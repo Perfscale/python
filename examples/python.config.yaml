@@ -13,17 +13,17 @@ allow_process_actions: true
 # it, `variables.python` sits one level below it, and the library entry's
 # `with:` provides defaults below both.
 python:
-  install-dir: .perfscale-tools/python
+  timeout_ms: 60000
 variables:
   python: { timeout_ms: 30000 }
 libraries:
   - use: ../python.wasm
     capabilities: [process]
 before:
-  # Pinned exact version + release, checksum-verified against the release's
-  # SHA256SUMS. install-dir comes from the `python:` extension block above;
-  # installs into a repo-local toolcache (gitignored); subsequent runs reuse
-  # it — nothing is re-downloaded.
+  # Pinned exact version, checksum-verified against the release's
+  # SHA256SUMS. Installs into the default toolcache
+  # (/tmp/perfscale-toolcache/python); subsequent runs reuse it — nothing is
+  # re-downloaded.
   - name: python
     use: lib/python/install
     with:

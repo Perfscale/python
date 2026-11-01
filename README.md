@@ -93,7 +93,7 @@ instantiation for the library `with:`, at step resolution for the rest.
 ```yaml
 python:                       # config extension, validated against the schema
   python-version: 3.13.18
-  install-dir: .perfscale-tools/python
+  install-dir: /tmp/perfscale-toolcache/python   # absolute (the default)
 variables:
   python: { timeout_ms: 30000 }
 libraries:

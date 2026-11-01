@@ -5,8 +5,6 @@
 #   npm run build   # → ../python.wasm relative to this file's examples dir
 #
 #   perfscale run -f examples/python.test.yaml -c examples/python.config.yaml
-#   (run from the repository root — the settings `install-dir` is resolved
-#    against the process cwd)
 #
 # NOTE: process steps are orchestration (setup, fixtures, one-off checks),
 # not a high-RPS hot path — each invocation is a real host spawn.
