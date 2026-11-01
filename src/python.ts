@@ -464,27 +464,36 @@ function runInstall(step: string, params: Record<string, unknown>, ctx: StepCtx)
   const path = `${installDir}/${base}`;
   const pythonPath = `${path}/python/bin/python3`;
 
-  // Idempotent: a working cached python is reused, never re-downloaded.
-  const cached = runHost(ctx, {
-    executable: pythonPath,
-    argv: ["--version"],
+  // Idempotent: a working cached python is reused, never re-downloaded. The
+  // host import hard-errors on spawn-ENOENT, so probe with /usr/bin/test
+  // first and only run `python --version` when the binary exists.
+  const probe = runHost(ctx, {
+    executable: "/usr/bin/test",
+    argv: ["-x", pythonPath],
     timeoutMs: SMALL_TIMEOUT_MS,
   });
-  if (cached.exitCode === 0) {
-    logs.push({ tag: "sys", line: `python: ${base} already installed at ${path} (${cached.stdout.trim()})` });
-    return {
-      success: true,
-      output: {
-        path,
-        "python-path": pythonPath,
-        version,
-        release,
-        exit_code: 0,
-        stdout: cached.stdout,
-        stderr: cached.stderr,
-      },
-      logs,
-    };
+  if (probe.exitCode === 0) {
+    const cached = runHost(ctx, {
+      executable: pythonPath,
+      argv: ["--version"],
+      timeoutMs: SMALL_TIMEOUT_MS,
+    });
+    if (cached.exitCode === 0) {
+      logs.push({ tag: "sys", line: `python: ${base} already installed at ${path} (${cached.stdout.trim()})` });
+      return {
+        success: true,
+        output: {
+          path,
+          "python-path": pythonPath,
+          version,
+          release,
+          exit_code: 0,
+          stdout: cached.stdout,
+          stderr: cached.stderr,
+        },
+        logs,
+      };
+    }
   }
 
   const tarballUrl = `${RELEASES}/download/${release}/${asset}`;

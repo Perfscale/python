@@ -15,9 +15,9 @@ its contract, for example:
   skipping the SHA-256 verification against the release's `SHA256SUMS`
   before extraction.
 - Spawning anything other than the documented `/usr/bin/uname`,
-  `/usr/bin/mkdir`, `/usr/bin/curl`, `/usr/bin/sha256sum`, `/usr/bin/tar`,
-  `/usr/bin/rm` (the downloaded archive only), or the selected python
-  binary.
+  `/usr/bin/test` (cache probe), `/usr/bin/mkdir`, `/usr/bin/curl`,
+  `/usr/bin/sha256sum`, `/usr/bin/tar`, `/usr/bin/rm` (the downloaded
+  archive only), or the selected python binary.
 - Leaking host environment variables into a child (the host import already
   guarantees a replacement environment; a bug that bypasses it matters).
 - The cache-idempotency or bad-archive cleanup deleting anything other than

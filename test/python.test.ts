@@ -52,16 +52,18 @@ const sums = (sha = SHA): string => `${sha}  ${ASSET}\n`;
  * downloaded.
  */
 function installHost(opts: { cached?: boolean; badSum?: boolean } = {}) {
-  let pyCalls = 0;
   return fakeExec((req) => {
     const argv = req.argv ?? [];
     if (req.executable === "/usr/bin/uname") {
       return ok(argv[0] === "-s" ? "Linux\n" : "x86_64\n");
     }
+    // The cache probe: ENOENT at spawn is a host error, so the component
+    // checks existence with test(1) before running the cached binary.
+    if (req.executable === "/usr/bin/test") {
+      return opts.cached ? ok() : { exitCode: 1, stdout: "", stderr: "" };
+    }
     if (req.executable.endsWith("/bin/python3")) {
-      pyCalls += 1;
-      if (opts.cached || pyCalls > 1) return ok(`Python ${VERSION}\n`);
-      return { exitCode: 1, stdout: "", stderr: "no such file" };
+      return ok(`Python ${VERSION}\n`);
     }
     if (req.executable === "/usr/bin/curl") {
       if (argv.includes("-o")) return ok();
