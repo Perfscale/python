@@ -1,0 +1,31 @@
+# Config side of the python e2e: profile, library registration with the
+# process capability, the one-shot `before:` install, and the double opt-in.
+vus: 1
+duration: 1s
+seed: 42
+# Double opt-in for the process capability: these config gates AND
+# `capabilities: [process]` on the libraries entry below. Missing either
+# side, the engine refuses to load the component (fail-closed, like `net`).
+allow_library_capabilities: true
+allow_process_actions: true
+# Run-level settings (RFC 009): the `python` extension block is claimed by
+# the component's config schema; a step's explicit `with:` still wins over
+# it, `variables.python` sits one level below it, and the library entry's
+# `with:` provides defaults below both.
+python:
+  timeout_ms: 60000
+variables:
+  python: { timeout_ms: 30000 }
+libraries:
+  - use: ../python.wasm
+    capabilities: [process]
+before:
+  # Pinned exact version, checksum-verified against the release's
+  # SHA256SUMS. Installs into the default toolcache
+  # (/tmp/perfscale-toolcache/python); subsequent runs reuse it — nothing is
+  # re-downloaded.
+  - name: python
+    use: lib/python/install
+    with:
+      python-version: 3.13.18
+    outputs: setup              # → ${{ config.setup.python-path }} in test steps
