@@ -27,6 +27,12 @@ import {
  * AND `allow_process_actions: true` + `allow_library_capabilities: true` in
  * the config.
  *
+ * Settings (RFC 009): every step knob may also come from the run —
+ * `extensions[python]` > `variables[python]` > the library entry's `with:`
+ * > built-in defaults; a step's explicit `with:` param beats them all, and
+ * `env` maps merge in that order. The component claims the `python` config
+ * extension key via its config schema (unknown keys fail the run).
+ *
  * Build: node ../sdk-step-authoring/ts/bin/perfscale-library-build.mjs \
  *          --kind steps --process src/python.ts -o python.wasm
  */
@@ -41,6 +47,163 @@ const RELEASES = "https://github.com/astral-sh/python-build-standalone/releases"
 /** Host-call budgets (still host-capped on top of these). */
 const TARBALL_TIMEOUT_MS = 600_000;
 const SMALL_TIMEOUT_MS = 60_000;
+
+// ---------------------------------------------------------------------------
+// Settings (RFC 009): library `with:` defaults + run settings
+// ---------------------------------------------------------------------------
+//
+// Every knob a step accepts may also be set once for the whole run.
+// Precedence (highest first):
+//
+//   1. the step's explicit `with:` params
+//   2. the run's `extensions[python]` block (claimed via configSchema)
+//   3. the run's `variables[python]` map
+//   4. the library entry's `with:` block (delivered to `init`)
+//   5. the built-in defaults below
+//
+// `env` maps merge in that same order (a step's `env` wins over the same
+// key set anywhere else); scalar keys take the highest-precedence value.
+// Invalid settings are hard errors at resolution time — never silently
+// ignored.
+
+/** The accepted keys of any settings block (step `with:` adds more). */
+const SETTINGS_KEYS = [
+  "python-version", "version", "release", "install-dir", "python-path",
+  "executable", "working-directory", "cwd", "timeout_ms", "timeoutMs", "env",
+];
+
+/** Normalized per-run defaults collected from the settings sources. */
+interface PythonSettings {
+  pythonVersion?: string | undefined;
+  release?: string | undefined;
+  installDir?: string | undefined;
+  pythonPath?: string | undefined;
+  cwd?: string | undefined;
+  timeoutMs?: number | undefined;
+  env?: Record<string, string> | undefined;
+}
+
+/** JSON Schema for the claimed `python` config extension key. */
+const PYTHON_CONFIG_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    "python-version": { type: "string", minLength: 1 },
+    version: { type: "string", minLength: 1 },
+    release: { type: "string", minLength: 1 },
+    "install-dir": { type: "string", minLength: 1 },
+    "python-path": { type: "string", minLength: 1 },
+    executable: { type: "string", minLength: 1 },
+    "working-directory": { type: "string", minLength: 1 },
+    cwd: { type: "string", minLength: 1 },
+    timeout_ms: { type: ["number", "string"] },
+    timeoutMs: { type: ["number", "string"] },
+    env: {
+      type: "object",
+      additionalProperties: { type: "string" },
+    },
+  },
+} as const;
+
+function parseSettingsBlock(source: string, raw: unknown): PythonSettings {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new StepError(`python settings (${source}): must be an object`);
+  }
+  const block = raw as Record<string, unknown>;
+  for (const k of Object.keys(block)) {
+    if (!SETTINGS_KEYS.includes(k)) {
+      throw new StepError(`python settings (${source}): unknown key '${k}'`);
+    }
+  }
+  const s: PythonSettings = {};
+  const str = (key: string): string | undefined => {
+    const v = block[key];
+    if (v === undefined) return undefined;
+    if (typeof v !== "string" || v === "") {
+      throw new StepError(`python settings (${source}): '${key}' must be a non-empty string`);
+    }
+    return v;
+  };
+  const version = str("python-version") ?? str("version");
+  if (version !== undefined) {
+    if (!EXACT_VERSION.test(version)) {
+      throw new StepError(
+        `python settings (${source}): 'python-version' must be an exact full version X.Y.Z (e.g. 3.13.18)`,
+      );
+    }
+    s.pythonVersion = version;
+  }
+  const release = str("release");
+  if (release !== undefined && !RELEASE_TAG.test(release)) {
+    throw new StepError(
+      `python settings (${source}): 'release' must be a python-build-standalone release tag (e.g. 20261026)`,
+    );
+  }
+  s.release = release;
+  s.installDir = str("install-dir");
+  s.pythonPath = str("python-path") ?? str("executable");
+  if (s.pythonPath !== undefined && !s.pythonPath.startsWith("/")) {
+    throw new StepError(`python settings (${source}): 'python-path' must be an absolute path`);
+  }
+  const wd = str("working-directory");
+  const cwd = str("cwd");
+  if (wd !== undefined && cwd !== undefined && wd !== cwd) {
+    throw new StepError(`python settings (${source}): 'working-directory' and 'cwd' disagree`);
+  }
+  s.cwd = wd ?? cwd;
+  const t = block["timeout_ms"] ?? block["timeoutMs"];
+  if (t !== undefined) {
+    const n = typeof t === "number" ? t : typeof t === "string" ? Number(t) : NaN;
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new StepError(`python settings (${source}): timeout must be a positive number of milliseconds`);
+    }
+    s.timeoutMs = n;
+  }
+  const env = block["env"];
+  if (env !== undefined) {
+    if (typeof env !== "object" || env === null || Array.isArray(env)) {
+      throw new StepError(`python settings (${source}): 'env' must be a map of string to string`);
+    }
+    s.env = {};
+    for (const [k, val] of Object.entries(env as Record<string, unknown>)) {
+      if (typeof val !== "string") {
+        throw new StepError(`python settings (${source}): env['${k}'] must be a string`);
+      }
+      s.env[k] = val;
+    }
+  }
+  return s;
+}
+
+/** Library-level `with:` defaults, captured by `init` at instantiation. */
+let libraryDefaults: PythonSettings = {};
+
+/**
+ * Resolve the effective settings for one step invocation:
+ * run extension > run variables > library `with:` (the step's own `with:`
+ * params are applied by the caller on top). Invalid blocks fail the step.
+ */
+function resolveSettings(ctx: StepCtx): PythonSettings {
+  const ext = parseSettingsBlock(
+    "extensions[python]",
+    ctx.settings.extensions?.["python"],
+  );
+  const vars = parseSettingsBlock(
+    "variables[python]",
+    ctx.settings.variables?.["python"],
+  );
+  const lib = libraryDefaults;
+  return {
+    pythonVersion: ext.pythonVersion ?? vars.pythonVersion ?? lib.pythonVersion,
+    release: ext.release ?? vars.release ?? lib.release,
+    installDir: ext.installDir ?? vars.installDir ?? lib.installDir,
+    pythonPath: ext.pythonPath ?? vars.pythonPath ?? lib.pythonPath,
+    cwd: ext.cwd ?? vars.cwd ?? lib.cwd,
+    timeoutMs: ext.timeoutMs ?? vars.timeoutMs ?? lib.timeoutMs,
+    env: { ...lib.env, ...vars.env, ...ext.env },
+  };
+}
 
 type Log = { tag: "out" | "err" | "sys"; line: string };
 type Out = Record<string, unknown>;
@@ -58,14 +221,6 @@ function strictKeys(step: string, params: Record<string, unknown>, allowed: stri
       throw new StepError(`python/${step}: unknown param '${k}'`);
     }
   }
-}
-
-function reqString(step: string, params: Record<string, unknown>, key: string): string {
-  const v = params[key];
-  if (typeof v !== "string" || v === "") {
-    throw new StepError(`python/${step}: '${key}' is required and must be a non-empty string`);
-  }
-  return v;
 }
 
 function optString(step: string, params: Record<string, unknown>, key: string): string | undefined {
@@ -92,9 +247,13 @@ function optCwd(step: string, params: Record<string, unknown>): string | undefin
   return (wd ?? cwd) as string | undefined;
 }
 
-/** User env merges over the minimal PATH; every value must be a string. */
-function optEnv(step: string, params: Record<string, unknown>): Record<string, string> {
-  const env: Record<string, string> = { PATH: DEFAULT_PATH };
+/** User env merges over the minimal PATH and any settings-level env. */
+function optEnv(
+  step: string,
+  params: Record<string, unknown>,
+  base: Record<string, string> = {},
+): Record<string, string> {
+  const env: Record<string, string> = { PATH: DEFAULT_PATH, ...base };
   const v = params["env"];
   if (v === undefined) return env;
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
@@ -175,20 +334,29 @@ interface InstallParsed {
   installDir: string;
 }
 
-function parseInstallParams(step: string, params: Record<string, unknown>): InstallParsed {
-  const pythonVersion = reqString(step, params, "python-version");
+function parseInstallParams(
+  step: string,
+  params: Record<string, unknown>,
+  settings: PythonSettings,
+): InstallParsed {
+  const explicit = optString(step, params, "python-version");
+  const pythonVersion = explicit ?? settings.pythonVersion;
+  if (pythonVersion === undefined) {
+    throw new StepError(`python/${step}: 'python-version' is required and must be a non-empty string`);
+  }
   if (!EXACT_VERSION.test(pythonVersion)) {
     throw new StepError(
       `python/${step}: 'python-version' must be an exact full version X.Y.Z (e.g. 3.13.18)`,
     );
   }
-  const release = optString(step, params, "release");
+  const release = optString(step, params, "release") ?? settings.release;
   if (release !== undefined && !RELEASE_TAG.test(release)) {
     throw new StepError(
       `python/${step}: 'release' must be a python-build-standalone release tag (e.g. 20261026)`,
     );
   }
-  const installDir = optString(step, params, "install-dir") ?? DEFAULT_INSTALL_DIR;
+  const installDir =
+    optString(step, params, "install-dir") ?? settings.installDir ?? DEFAULT_INSTALL_DIR;
   return { version: pythonVersion, release, installDir };
 }
 
@@ -284,7 +452,7 @@ function resolveRelease(
 
 function runInstall(step: string, params: Record<string, unknown>, ctx: StepCtx): StepOutcome {
   const logs: Log[] = [];
-  const { version, release: requestedRelease, installDir } = parseInstallParams(step, params);
+  const { version, release: requestedRelease, installDir } = parseInstallParams(step, params, resolveSettings(ctx));
   const triple = hostTriple(ctx);
 
   const resolved = resolveRelease(ctx, version, requestedRelease, triple, logs);
@@ -422,19 +590,21 @@ function runExec(
   ctx: StepCtx,
   installedPythonPath?: string,
 ): StepOutcome {
+  const settings = resolveSettings(ctx);
   const script = optString(step, params, "script");
   const file = optString(step, params, "file");
   if ((script === undefined) === (file === undefined)) {
     throw new StepError(`python/${step}: exactly one of 'script' or 'file' is required`);
   }
-  const pythonPath = installedPythonPath ?? optString(step, params, "python-path") ?? DEFAULT_PYTHON_PATH;
+  const pythonPath =
+    installedPythonPath ?? optString(step, params, "python-path") ?? settings.pythonPath ?? DEFAULT_PYTHON_PATH;
   if (!pythonPath.startsWith("/")) {
     throw new StepError(`python/${step}: 'python-path' must be an absolute path to the python executable`);
   }
   const args = optArgs(step, params);
-  const cwd = optCwd(step, params);
-  const env = optEnv(step, params);
-  const timeoutMs = optTimeoutMs(step, params);
+  const cwd = optCwd(step, params) ?? settings.cwd;
+  const env = optEnv(step, params, settings.env);
+  const timeoutMs = optTimeoutMs(step, params) ?? settings.timeoutMs;
 
   const argv = script !== undefined ? ["-c", script, ...args] : [file!, ...args];
   const res = ctx.exec({
@@ -461,6 +631,12 @@ function runExec(
 export default defineSteps({
   name: "python",
   version: "0.1.0",
+  configSchema: { key: "python", schema: PYTHON_CONFIG_SCHEMA },
+  init(config) {
+    // Library-level `with:` defaults — validated once at instantiation;
+    // invalid defaults are fatal to the run, never silently ignored.
+    libraryDefaults = parseSettingsBlock("library with", config);
+  },
   steps: {
     install: {
       description:

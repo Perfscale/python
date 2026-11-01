@@ -1,0 +1,32 @@
+# Local e2e for the `python` step library (RFC 009 process capability).
+# Steps only — the capability double opt-in and the `before:` install live
+# in python.config.yaml. Build first:
+#
+#   npm run build   # → ../python.wasm relative to this file's examples dir
+#
+#   perfscale run -f examples/python.test.yaml -c examples/python.config.yaml
+#   (run from the repository root — the settings `install-dir` is resolved
+#    against the process cwd)
+#
+# NOTE: process steps are orchestration (setup, fixtures, one-off checks),
+# not a high-RPS hot path — each invocation is a real host spawn.
+steps:
+  # Uses the exact python installed by the config's `before:` block.
+  - name: inline-script
+    use: lib/python/exec
+    with:
+      python-path: "${{ config.setup.python-path }}"
+      script: import sys; print(f"hello from python {sys.version_info.major}.{sys.version_info.minor}")
+    outputs: said
+    check:
+      message_contains: hello from python 3.13
+
+  - name: install-exec-one-shot
+    use: lib/python/install-exec
+    with:
+      python-version: 3.13.18
+      script: import sys; print(sys.argv[1:])
+      args: ["perfscale"]
+    outputs: combo
+    check:
+      message_contains: perfscale
